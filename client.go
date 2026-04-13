@@ -13,10 +13,10 @@ func NewClient(fetcher *Fetcher) *Client {
 }
 
 func (c *Client) Verify(ctx context.Context, proofJSON []byte, inputs CircuitInputs, proofType, expectedChallenge string) (VerifyResult, error) {
-	return c.VerifyWithCircuit(ctx, proofJSON, inputs, proofType, expectedChallenge, DefaultCircuit)
+	return c.VerifyWithCircuit(ctx, proofJSON, inputs, proofType, expectedChallenge, StudentStatusCircuit)
 }
 
-func (c *Client) VerifyWithCircuit(ctx context.Context, proofJSON []byte, inputs CircuitInputs, proofType, expectedChallenge string, circuit Circuit) (VerifyResult, error) {
+func (c *Client) VerifyWithCircuit(ctx context.Context, proofJSON []byte, inputs CircuitInputs, proofType, expectedChallenge string, circuit *Circuit) (VerifyResult, error) {
 	vkJSON, err := c.fetcher.VerificationKey(ctx, proofType)
 	if err != nil {
 		return VerifyResult{}, err

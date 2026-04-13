@@ -26,55 +26,95 @@ type VerifyResult struct {
 	Reason string
 }
 
-// Circuit maps credential inputs to the public signals required by a specific circuit.
-// Different circuits encode different fields or orderings into their public signals.
-type Circuit func(inputs CircuitInputs) ([]string, error)
+type Circuit struct {
+	PreVerify  func(req VerifyRequest) (*VerifyResult, error)
+	Signals    func(req VerifyRequest) ([]string, error)
+	PostVerify func(req VerifyRequest) (*VerifyResult, error)
+}
 
-// CircuitInputs holds the raw credential data. The Circuit function derives the
-// public signals from these; the Verify function validates them directly.
 type CircuitInputs struct {
 	Fields          map[string]string
 	Signatures      map[string]string
 	Challenge       string
 	ExpiresAt       int64
 	RevocationIndex int
+	CredentialID    string
 }
 
-// DefaultCircuit produces public signals in ZeroVerify's standard order:
-// [challenge, expires_at, revocation_index]
-var DefaultCircuit Circuit = func(inputs CircuitInputs) ([]string, error) {
-	return []string{
-		inputs.Challenge,
-		strconv.FormatInt(inputs.ExpiresAt, 10),
-		strconv.Itoa(inputs.RevocationIndex),
-	}, nil
+var StudentStatusCircuit = &Circuit{
+	PreVerify: func(req VerifyRequest) (*VerifyResult, error) {
+		if req.Inputs.Challenge != req.ExpectedChallenge {
+			return &VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
+		}
+		if time.Now().Unix() > req.Inputs.ExpiresAt {
+			return &VerifyResult{Valid: false, Reason: ReasonTimestampExpired}, nil
+		}
+		revoked, err := isRevoked(req.Bitstring, req.Inputs.RevocationIndex)
+		if err != nil {
+			return nil, fmt.Errorf("checking revocation: %w", err)
+		}
+		if revoked {
+			return &VerifyResult{Valid: false, Reason: ReasonCredentialRevoked}, nil
+		}
+		return nil, nil
+	},
+	Signals: func(req VerifyRequest) ([]string, error) {
+		return []string{
+			req.Inputs.Challenge,
+			strconv.FormatInt(req.Inputs.ExpiresAt, 10),
+			strconv.Itoa(req.Inputs.RevocationIndex),
+		}, nil
+	},
+	PostVerify: func(req VerifyRequest) (*VerifyResult, error) {
+		if req.BabyJubJubPubKey == "" {
+			return nil, nil
+		}
+		if err := verifyFieldSignatures(req.BabyJubJubPubKey, req.Inputs.Fields, req.Inputs.Signatures); err != nil {
+			return &VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
+		}
+		return nil, nil
+	},
+}
+
+var RevocationCircuit = &Circuit{
+	Signals: func(req VerifyRequest) ([]string, error) {
+		ax, ay, err := DecompressBabyJubJubKey(req.BabyJubJubPubKey)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing issuer public key: %w", err)
+		}
+		credIDFE := FieldElement(req.Inputs.CredentialID).String()
+		return []string{credIDFE, ax, ay}, nil
+	},
 }
 
 type VerifyRequest struct {
 	ProofJSON         []byte
 	Inputs            CircuitInputs
 	ExpectedChallenge string
-	Circuit           Circuit
+	Circuit           *Circuit
 	VerificationKey   []byte
 	Bitstring         []byte
 	BabyJubJubPubKey  string
 }
 
 func Verify(req VerifyRequest) (VerifyResult, error) {
-	if req.Inputs.Challenge != req.ExpectedChallenge {
-		return VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
+	circuit := req.Circuit
+	if circuit == nil {
+		circuit = StudentStatusCircuit
 	}
 
-	if time.Now().Unix() > req.Inputs.ExpiresAt {
-		return VerifyResult{Valid: false, Reason: ReasonTimestampExpired}, nil
+	if circuit.Signals == nil {
+		return VerifyResult{}, fmt.Errorf("circuit Signals hook is required")
 	}
 
-	revoked, err := isRevoked(req.Bitstring, req.Inputs.RevocationIndex)
-	if err != nil {
-		return VerifyResult{}, fmt.Errorf("checking revocation: %w", err)
-	}
-	if revoked {
-		return VerifyResult{Valid: false, Reason: ReasonCredentialRevoked}, nil
+	if circuit.PreVerify != nil {
+		result, err := circuit.PreVerify(req)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		if result != nil {
+			return *result, nil
+		}
 	}
 
 	var proofData types.ProofData
@@ -82,11 +122,7 @@ func Verify(req VerifyRequest) (VerifyResult, error) {
 		return VerifyResult{}, fmt.Errorf("parsing proof JSON: %w", err)
 	}
 
-	circuit := req.Circuit
-	if circuit == nil {
-		circuit = DefaultCircuit
-	}
-	signals, err := circuit(req.Inputs)
+	signals, err := circuit.Signals(req)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("computing public signals: %w", err)
 	}
@@ -96,9 +132,13 @@ func Verify(req VerifyRequest) (VerifyResult, error) {
 		return VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
 	}
 
-	if req.BabyJubJubPubKey != "" {
-		if err := verifyFieldSignatures(req.BabyJubJubPubKey, req.Inputs.Fields, req.Inputs.Signatures); err != nil {
-			return VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
+	if circuit.PostVerify != nil {
+		result, err := circuit.PostVerify(req)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		if result != nil {
+			return *result, nil
 		}
 	}
 
@@ -203,4 +243,3 @@ func fieldElement(value string) *big.Int {
 	n.Mod(n, babyjub.SubOrder)
 	return n
 }
-
