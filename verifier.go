@@ -105,6 +105,43 @@ func Verify(req VerifyRequest) (VerifyResult, error) {
 	return VerifyResult{Valid: true}, nil
 }
 
+func VerifyProof(proofJSON []byte, verificationKey []byte, publicSignals []string) (VerifyResult, error) {
+	var proofData types.ProofData
+	if err := json.Unmarshal(proofJSON, &proofData); err != nil {
+		return VerifyResult{}, fmt.Errorf("parsing proof JSON: %w", err)
+	}
+
+	proof := types.ZKProof{Proof: &proofData, PubSignals: publicSignals}
+	if err := groth16.Verify(proof, verificationKey); err != nil {
+		return VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
+	}
+
+	return VerifyResult{Valid: true}, nil
+}
+
+func FieldElement(value string) *big.Int {
+	return fieldElement(value)
+}
+
+func DecompressBabyJubJubKey(pubKeyHex string) (x, y string, err error) {
+	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil {
+		return "", "", fmt.Errorf("decoding public key hex: %w", err)
+	}
+	if len(pubKeyBytes) != 32 {
+		return "", "", fmt.Errorf("public key must be 32 bytes, got %d", len(pubKeyBytes))
+	}
+
+	var comp babyjub.PublicKeyComp
+	copy(comp[:], pubKeyBytes)
+	pubKey, err := comp.Decompress()
+	if err != nil {
+		return "", "", fmt.Errorf("decompressing public key: %w", err)
+	}
+
+	return pubKey.X.String(), pubKey.Y.String(), nil
+}
+
 func isRevoked(bitstring []byte, revocationIndex int) (bool, error) {
 	byteIndex := revocationIndex / 8
 	bitIndex := 7 - (revocationIndex % 8)
