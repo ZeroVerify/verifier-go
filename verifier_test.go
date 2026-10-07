@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,7 +19,7 @@ func gzipBytes(t *testing.T, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	gz.Write(data)
+	gz.Write([]byte(base64.StdEncoding.EncodeToString(data))) // same encoding as bitstring-updater-lambda
 	gz.Close()
 	return buf.Bytes()
 }
@@ -164,5 +166,56 @@ func TestVerifyChallengeMismatch(t *testing.T) {
 	}
 	if result.Valid || result.Reason != verifier.ReasonProofInvalid {
 		t.Fatalf("expected proof_invalid, got valid=%v reason=%q", result.Valid, result.Reason)
+	}
+}
+
+func newStudentSignals(challenge string, index int, now int64) []string {
+	return []string{challenge, strconv.Itoa(index), challenge, strconv.FormatInt(now, 10)}
+}
+
+func verifySignals(signals []string, bits []byte) verifier.VerifyResult {
+	res, _ := verifier.Verify(verifier.VerifyRequest{
+		ProofJSON: stubProofJSON, PublicSignals: signals, ExpectedChallenge: "nonce",
+		VerificationKey: []byte(`{}`), Bitstring: bits,
+	})
+	return res
+}
+
+func TestPublicSignalsNowFarFromClockRejected(t *testing.T) {
+	res := verifySignals(newStudentSignals("nonce", 0, time.Now().Add(-time.Hour).Unix()), make([]byte, 16))
+	if res.Valid || res.Reason != verifier.ReasonTimestampExpired {
+		t.Fatalf("expected timestamp_expired for back-dated now, got %+v", res)
+	}
+}
+
+func TestPublicSignalsRevocationIndexIsRead(t *testing.T) {
+	bs := make([]byte, 16)
+	bs[1] = 0b01000000 // bit 9
+	res := verifySignals(newStudentSignals("nonce", 9, time.Now().Unix()), bs)
+	if res.Valid || res.Reason != verifier.ReasonCredentialRevoked {
+		t.Fatalf("expected credential_revoked, got %+v", res)
+	}
+}
+
+func TestPublicSignalsMalformedRejected(t *testing.T) {
+	for name, sig := range map[string][]string{
+		"too few":        {"nonce", "0", "nonce"},
+		"nonce mismatch": {"other", "0", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"bad index":      {"nonce", "x", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"negative index": {"nonce", "-1", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+	} {
+		if res := verifySignals(sig, make([]byte, 16)); res.Valid || res.Reason != verifier.ReasonProofInvalid {
+			t.Errorf("%s: expected proof_invalid, got %+v", name, res)
+		}
+	}
+}
+
+func TestPublicSignalsWrongChallengeRejected(t *testing.T) {
+	res, _ := verifier.Verify(verifier.VerifyRequest{
+		ProofJSON: stubProofJSON, PublicSignals: newStudentSignals("nonce", 0, time.Now().Unix()), ExpectedChallenge: "different",
+		VerificationKey: []byte(`{}`), Bitstring: make([]byte, 16),
+	})
+	if res.Valid || res.Reason != verifier.ReasonProofInvalid {
+		t.Fatalf("expected proof_invalid, got %+v", res)
 	}
 }

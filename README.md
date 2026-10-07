@@ -30,25 +30,29 @@ if !result.Valid {
 
 ## Public Signals
 
-The library expects public signals in this order by default:
+The `student_status` circuit has these public signals, in order:
 
-| Index | Value             | Format                |
-|-------|-------------------|-----------------------|
-| 0     | challenge         | decimal field element |
-| 1     | expires_at        | Unix timestamp        |
-| 2     | revocation_index  | bit position          |
+| Index | Value             | Notes                                                        |
+|-------|-------------------|--------------------------------------------------------------|
+| 0     | out_nonce         | echo of the challenge nonce                                  |
+| 1     | revocation_index  | bit position in the status list, signed by the issuer        |
+| 2     | challenge_nonce   | must equal the nonce the verifier issued                     |
+| 3     | now               | prover-chosen Unix time, checked against the verifier clock  |
 
-If your circuit outputs signals in a different order, use `VerifyWithLayout`:
+The circuit proves `issued_at <= now < expires_at` for issuer-signed values, so the SDK must (and does) reject a `now`
+that differs from its own clock by more than `DefaultClockSkew` (5 minutes). Otherwise an expired credential could be
+presented with a back-dated `now`.
+
+## Recommended Usage
+
+Pass the wallet's callback body straight in:
 
 ```go
-layout := verifier.SignalLayout{
-    ChallengeIndex:     2,
-    ExpiresAtIndex:     0,
-    RevocationIndexIdx: 1,
-}
-
-result, err := client.VerifyWithLayout(ctx, proof, "student_status", challenge, layout)
+result, err := client.VerifySubmission(ctx, requestBody, "student_status", expectedChallenge)
 ```
+
+The body is the JSON the wallet POSTs: `{"proof": {...}, "publicSignals": [...]}`. The nonce, clock and revocation checks are
+made on the same public signals the Groth16 proof is verified against, so none of them can be forged separately.
 
 ## Custom Endpoints
 
@@ -70,7 +74,7 @@ verifier.DefaultBitstringURL // "https://artifacts.api.zeroverify.net/bitstring/
 verifier.DefaultPublicKeyURL // "https://artifacts.api.zeroverify.net/issuer/public-key.json"
 ```
 
-Verification keys are cached for the lifetime of the process. The revocation bitstring is cached for 5 minutes.
+Verification keys are cached for the lifetime of the process. The revocation bitstring is cached for 5 minutes. It is read as `gzip(base64(bits))`, the format written by bitstring-updater-lambda.
 
 ## Field Signature Verification
 
@@ -133,7 +137,7 @@ Checks run in this order and stop at the first failure:
 
 1. Signal count validation
 2. Challenge match
-3. Expiry (`expires_at` vs current time)
+3. `now` signal within clock skew of the verifier's clock
 4. Revocation (bit at `revocation_index` in bitstring)
 5. Groth16 proof
 6. BabyJubJub field signatures (only if `BabyJubJubPubKey` is set)

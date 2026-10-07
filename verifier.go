@@ -19,6 +19,9 @@ const (
 	ReasonProofInvalid      = "proof_invalid"
 	ReasonTimestampExpired  = "timestamp_expired"
 	ReasonCredentialRevoked = "credential_revoked"
+
+	// DefaultClockSkew is how far the prover-supplied `now` public signal may differ from the verifier's clock.
+	DefaultClockSkew = 5 * time.Minute
 )
 
 type VerifyResult struct {
@@ -33,12 +36,45 @@ type Circuit struct {
 }
 
 type CircuitInputs struct {
-	Fields          map[string]string
-	Signatures      map[string]string
-	Challenge       string
+	Fields     map[string]string
+	Signatures map[string]string
+	Challenge  string
+	// ExpiresAt is optional. Credential expiry is enforced inside the circuit (issued_at <= now < expires_at,
+	// all signed by the issuer), so a verifier only needs to check that `now` matches its own clock.
 	ExpiresAt       int64
+	Now             int64 // the `now` public signal the prover used (taken from PublicSignals when present)
 	RevocationIndex int
 	CredentialID    string
+}
+
+// Public signal layout of the student_status circuit:
+// [out_nonce, revocation_index, challenge_nonce, now]
+const (
+	studentSignalOutNonce        = 0
+	studentSignalRevocationIndex = 1
+	studentSignalChallenge       = 2
+	studentSignalNow             = 3
+	studentSignalCount           = 4
+)
+
+func applyStudentSignals(req *VerifyRequest) *VerifyResult {
+	sig := req.PublicSignals
+	invalid := &VerifyResult{Valid: false, Reason: ReasonProofInvalid}
+	if len(sig) != studentSignalCount || sig[studentSignalOutNonce] != sig[studentSignalChallenge] {
+		return invalid
+	}
+	idx, err := strconv.Atoi(sig[studentSignalRevocationIndex])
+	if err != nil || idx < 0 {
+		return invalid
+	}
+	now, err := strconv.ParseInt(sig[studentSignalNow], 10, 64)
+	if err != nil {
+		return invalid
+	}
+	req.Inputs.Challenge = sig[studentSignalChallenge]
+	req.Inputs.RevocationIndex = idx
+	req.Inputs.Now = now
+	return nil
 }
 
 var StudentStatusCircuit = &Circuit{
@@ -46,8 +82,27 @@ var StudentStatusCircuit = &Circuit{
 		if req.Inputs.Challenge != req.ExpectedChallenge {
 			return &VerifyResult{Valid: false, Reason: ReasonProofInvalid}, nil
 		}
-		if time.Now().Unix() > req.Inputs.ExpiresAt {
+		clock := req.Clock
+		if clock == nil {
+			clock = time.Now
+		}
+		if req.Inputs.ExpiresAt != 0 && clock().Unix() > req.Inputs.ExpiresAt {
 			return &VerifyResult{Valid: false, Reason: ReasonTimestampExpired}, nil
+		}
+		// The circuit only proves the credential was valid at the prover-chosen `now`.
+		// Without this check a prover could present an expired credential with a back-dated `now`.
+		if req.PublicSignals != nil {
+			skew := req.ClockSkew
+			if skew == 0 {
+				skew = DefaultClockSkew
+			}
+			diff := clock().Unix() - req.Inputs.Now
+			if diff < 0 {
+				diff = -diff
+			}
+			if time.Duration(diff)*time.Second > skew {
+				return &VerifyResult{Valid: false, Reason: ReasonTimestampExpired}, nil
+			}
 		}
 		revoked, err := isRevoked(req.Bitstring, req.Inputs.RevocationIndex)
 		if err != nil {
@@ -59,10 +114,14 @@ var StudentStatusCircuit = &Circuit{
 		return nil, nil
 	},
 	Signals: func(req VerifyRequest) ([]string, error) {
+		if req.PublicSignals != nil {
+			return req.PublicSignals, nil
+		}
 		return []string{
 			req.Inputs.Challenge,
-			strconv.FormatInt(req.Inputs.ExpiresAt, 10),
 			strconv.Itoa(req.Inputs.RevocationIndex),
+			req.Inputs.Challenge,
+			strconv.FormatInt(req.Inputs.Now, 10),
 		}, nil
 	},
 	PostVerify: func(req VerifyRequest) (*VerifyResult, error) {
@@ -95,12 +154,24 @@ type VerifyRequest struct {
 	VerificationKey   []byte
 	Bitstring         []byte
 	BabyJubJubPubKey  string
+
+	// PublicSignals are the public signals submitted with the proof. Preferred over Inputs: the signals the
+	// proof is checked against are exactly the ones the checks (nonce, now, revocation index) are made on.
+	PublicSignals []string
+	ClockSkew     time.Duration    // 0 means DefaultClockSkew
+	Clock         func() time.Time // nil means time.Now (for tests)
 }
 
 func Verify(req VerifyRequest) (VerifyResult, error) {
 	circuit := req.Circuit
 	if circuit == nil {
 		circuit = StudentStatusCircuit
+	}
+
+	if circuit == StudentStatusCircuit && req.PublicSignals != nil {
+		if bad := applyStudentSignals(&req); bad != nil {
+			return *bad, nil
+		}
 	}
 
 	if circuit.Signals == nil {

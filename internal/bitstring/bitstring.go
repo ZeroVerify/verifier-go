@@ -3,6 +3,7 @@ package bitstring
 import (
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,9 +54,14 @@ func fetch(ctx context.Context, url string) ([]byte, error) {
 	}
 	defer gz.Close()
 
-	data, err := io.ReadAll(gz)
+	b64, err := io.ReadAll(gz)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing bitstring: %w", err)
+	}
+	// bitstring-updater-lambda stores gzip(base64(bits)).
+	data, err := base64.StdEncoding.DecodeString(string(b64))
+	if err != nil {
+		return nil, fmt.Errorf("decoding bitstring: %w", err)
 	}
 	return data, nil
 }
