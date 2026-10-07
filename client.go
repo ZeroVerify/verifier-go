@@ -4,10 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type Client struct {
-	fetcher *Fetcher
+	fetcher   *Fetcher
+	clock     func() time.Time
+	clockSkew time.Duration
+}
+
+// WithClock overrides the clock used for the `now` check (intended for tests) and the allowed skew (0 = DefaultClockSkew).
+func (c *Client) WithClock(clock func() time.Time, skew time.Duration) *Client {
+	cp := *c
+	cp.clock, cp.clockSkew = clock, skew
+	return &cp
 }
 
 func NewClient(fetcher *Fetcher) *Client {
@@ -58,6 +68,8 @@ func (c *Client) verify(ctx context.Context, proofJSON []byte, inputs CircuitInp
 		ProofJSON:         proofJSON,
 		Inputs:            inputs,
 		PublicSignals:     publicSignals,
+		Clock:             c.clock,
+		ClockSkew:         c.clockSkew,
 		ExpectedChallenge: expectedChallenge,
 		Circuit:           circuit,
 		VerificationKey:   vkJSON,
