@@ -170,7 +170,7 @@ func TestVerifyChallengeMismatch(t *testing.T) {
 }
 
 func newStudentSignals(challenge string, index int, now int64) []string {
-	return []string{challenge, strconv.Itoa(index), challenge, strconv.FormatInt(now, 10)}
+	return []string{challenge, "12345", strconv.Itoa(index), challenge, strconv.FormatInt(now, 10)}
 }
 
 func verifySignals(signals []string, bits []byte) verifier.VerifyResult {
@@ -199,10 +199,10 @@ func TestPublicSignalsRevocationIndexIsRead(t *testing.T) {
 
 func TestPublicSignalsMalformedRejected(t *testing.T) {
 	for name, sig := range map[string][]string{
-		"too few":        {"nonce", "0", "nonce"},
-		"nonce mismatch": {"other", "0", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
-		"bad index":      {"nonce", "x", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
-		"negative index": {"nonce", "-1", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"too few":        {"nonce", "0", "nonce", "1"},
+		"nonce mismatch": {"other", "1", "0", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"bad index":      {"nonce", "1", "x", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"negative index": {"nonce", "1", "-1", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
 	} {
 		if res := verifySignals(sig, make([]byte, 16)); res.Valid || res.Reason != verifier.ReasonProofInvalid {
 			t.Errorf("%s: expected proof_invalid, got %+v", name, res)
