@@ -44,17 +44,19 @@ type CircuitInputs struct {
 	ExpiresAt       int64
 	Now             int64 // the `now` public signal the prover used (taken from PublicSignals when present)
 	RevocationIndex int
+	PseudonymHash   string // pseudonym_hash public signal (taken from PublicSignals when present)
 	CredentialID    string
 }
 
 // Public signal layout of the student_status circuit:
-// [out_nonce, revocation_index, challenge_nonce, now]
+// [out_nonce, pseudonym_hash, revocation_index, challenge_nonce, now]
 const (
 	studentSignalOutNonce        = 0
-	studentSignalRevocationIndex = 1
-	studentSignalChallenge       = 2
-	studentSignalNow             = 3
-	studentSignalCount           = 4
+	studentSignalPseudonymHash   = 1 // stable per person; lets a verifier detect reuse, also links a person across verifiers
+	studentSignalRevocationIndex = 2
+	studentSignalChallenge       = 3
+	studentSignalNow             = 4
+	studentSignalCount           = 5
 )
 
 func applyStudentSignals(req *VerifyRequest) *VerifyResult {
@@ -71,6 +73,7 @@ func applyStudentSignals(req *VerifyRequest) *VerifyResult {
 	if err != nil {
 		return invalid
 	}
+	req.Inputs.PseudonymHash = sig[studentSignalPseudonymHash]
 	req.Inputs.Challenge = sig[studentSignalChallenge]
 	req.Inputs.RevocationIndex = idx
 	req.Inputs.Now = now
@@ -119,6 +122,7 @@ var StudentStatusCircuit = &Circuit{
 		}
 		return []string{
 			req.Inputs.Challenge,
+			req.Inputs.PseudonymHash,
 			strconv.Itoa(req.Inputs.RevocationIndex),
 			req.Inputs.Challenge,
 			strconv.FormatInt(req.Inputs.Now, 10),

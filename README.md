@@ -35,9 +35,13 @@ The `student_status` circuit has these public signals, in order:
 | Index | Value             | Notes                                                        |
 |-------|-------------------|--------------------------------------------------------------|
 | 0     | out_nonce         | echo of the challenge nonce                                  |
-| 1     | revocation_index  | bit position in the status list, signed by the issuer        |
-| 2     | challenge_nonce   | must equal the nonce the verifier issued                     |
-| 3     | now               | prover-chosen Unix time, checked against the verifier clock  |
+| 1     | pseudonym_hash    | stable per person (see below)                                |
+| 2     | revocation_index  | bit position in the status list, signed by the issuer        |
+| 3     | challenge_nonce   | must equal the nonce the verifier issued                     |
+| 4     | now               | prover-chosen Unix time, checked against the verifier clock  |
+
+`pseudonym_hash` is the same in every proof from the same person. A verifier can use it to detect reuse (one person, one use),
+but verifiers that compare values can also link that person across services. A per-verifier value would avoid this (future work).
 
 The circuit proves `issued_at <= now < expires_at` for issuer-signed values, so the SDK must (and does) reject a `now`
 that differs from its own clock by more than `DefaultClockSkew` (5 minutes). Otherwise an expired credential could be
