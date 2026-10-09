@@ -37,8 +37,16 @@ The `student_status` circuit has these public signals, in order:
 | 0     | out_nonce         | echo of the challenge nonce                                  |
 | 1     | pseudonym_hash    | stable per person (see below)                                |
 | 2     | revocation_index  | bit position in the status list, signed by the issuer        |
-| 3     | challenge_nonce   | must equal the nonce the verifier issued                     |
-| 4     | now               | prover-chosen Unix time, checked against the verifier clock  |
+| 3     | Ax                | issuer public key x, must equal the published issuer key     |
+| 4     | Ay                | issuer public key y, must equal the published issuer key     |
+| 5     | challenge_nonce   | must equal the nonce the verifier issued                     |
+| 6     | now               | prover-chosen Unix time, checked against the verifier clock  |
+
+**The issuer key signals are a security check.** The circuit verifies an EdDSA signature under `Ax, Ay`, but it cannot know
+which key is the real issuer's. If the SDK did not compare them with the published issuer key (`reason: untrusted_issuer`),
+anyone could generate their own key, sign their own "student" credential and obtain a proof that verifies. `Verify` therefore
+requires `BabyJubJubPubKey` for `student_status` proofs and returns an error instead of skipping the check when it is missing.
+`Client.VerifySubmission` fetches and passes the key for you.
 
 `pseudonym_hash` is the same in every proof from the same person. A verifier can use it to detect reuse (one person, one use),
 but verifiers that compare values can also link that person across services. A per-verifier value would avoid this (future work).
