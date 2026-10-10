@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iden3/go-iden3-crypto/babyjub"
 	verifier "github.com/zeroverify/verifier-go"
 )
 
@@ -169,16 +171,54 @@ func TestVerifyChallengeMismatch(t *testing.T) {
 	}
 }
 
+// testKey derives a deterministic Baby Jubjub key pair: compressed hex plus decimal Ax and Ay, as the issuer publishes it.
+func testKey(seed byte) (pubHex, ax, ay string) {
+	var sk babyjub.PrivateKey
+	copy(sk[:], bytes.Repeat([]byte{seed}, 32))
+	pub := sk.Public()
+	comp := pub.Compress()
+	return hex.EncodeToString(comp[:]), pub.X.String(), pub.Y.String()
+}
+
+var issuerHex, issuerAx, issuerAy = testKey(7)
+
+// newStudentSignals builds [out_nonce, pseudonym_hash, revocation_index, Ax, Ay, challenge_nonce, now] for the trusted issuer.
 func newStudentSignals(challenge string, index int, now int64) []string {
-	return []string{challenge, "12345", strconv.Itoa(index), challenge, strconv.FormatInt(now, 10)}
+	return []string{challenge, "12345", strconv.Itoa(index), issuerAx, issuerAy, challenge, strconv.FormatInt(now, 10)}
 }
 
 func verifySignals(signals []string, bits []byte) verifier.VerifyResult {
 	res, _ := verifier.Verify(verifier.VerifyRequest{
 		ProofJSON: stubProofJSON, PublicSignals: signals, ExpectedChallenge: "nonce",
-		VerificationKey: []byte(`{}`), Bitstring: bits,
+		VerificationKey: []byte(`{}`), Bitstring: bits, BabyJubJubPubKey: issuerHex,
 	})
 	return res
+}
+
+// A proof made against any other key (for example one the prover generated and used to sign their own credential)
+// must be rejected before the proof is even checked.
+func TestSelfSignedCredentialRejected(t *testing.T) {
+	_, ax, ay := testKey(9) // an attacker's own key
+	sig := newStudentSignals("nonce", 0, time.Now().Unix())
+	sig[3], sig[4] = ax, ay
+	if res := verifySignals(sig, make([]byte, 16)); res.Valid || res.Reason != verifier.ReasonUntrustedIssuer {
+		t.Fatalf("expected untrusted_issuer, got %+v", res)
+	}
+	sig = newStudentSignals("nonce", 0, time.Now().Unix())
+	sig[4] = "1" // only one coordinate matches
+	if res := verifySignals(sig, make([]byte, 16)); res.Valid || res.Reason != verifier.ReasonUntrustedIssuer {
+		t.Fatalf("expected untrusted_issuer for a half-matching key, got %+v", res)
+	}
+}
+
+func TestStudentProofWithoutIssuerKeyIsAnError(t *testing.T) {
+	_, err := verifier.Verify(verifier.VerifyRequest{
+		ProofJSON: stubProofJSON, PublicSignals: newStudentSignals("nonce", 0, time.Now().Unix()), ExpectedChallenge: "nonce",
+		VerificationKey: []byte(`{}`), Bitstring: make([]byte, 16),
+	})
+	if err == nil {
+		t.Fatal("verifying without the issuer public key must fail loudly, not skip the check")
+	}
 }
 
 func TestPublicSignalsNowFarFromClockRejected(t *testing.T) {
@@ -200,9 +240,9 @@ func TestPublicSignalsRevocationIndexIsRead(t *testing.T) {
 func TestPublicSignalsMalformedRejected(t *testing.T) {
 	for name, sig := range map[string][]string{
 		"too few":        {"nonce", "0", "nonce", "1"},
-		"nonce mismatch": {"other", "1", "0", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
-		"bad index":      {"nonce", "1", "x", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
-		"negative index": {"nonce", "1", "-1", "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"nonce mismatch": {"other", "1", "0", issuerAx, issuerAy, "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"bad index":      {"nonce", "1", "x", issuerAx, issuerAy, "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
+		"negative index": {"nonce", "1", "-1", issuerAx, issuerAy, "nonce", strconv.FormatInt(time.Now().Unix(), 10)},
 	} {
 		if res := verifySignals(sig, make([]byte, 16)); res.Valid || res.Reason != verifier.ReasonProofInvalid {
 			t.Errorf("%s: expected proof_invalid, got %+v", name, res)
@@ -213,7 +253,7 @@ func TestPublicSignalsMalformedRejected(t *testing.T) {
 func TestPublicSignalsWrongChallengeRejected(t *testing.T) {
 	res, _ := verifier.Verify(verifier.VerifyRequest{
 		ProofJSON: stubProofJSON, PublicSignals: newStudentSignals("nonce", 0, time.Now().Unix()), ExpectedChallenge: "different",
-		VerificationKey: []byte(`{}`), Bitstring: make([]byte, 16),
+		VerificationKey: []byte(`{}`), Bitstring: make([]byte, 16), BabyJubJubPubKey: issuerHex,
 	})
 	if res.Valid || res.Reason != verifier.ReasonProofInvalid {
 		t.Fatalf("expected proof_invalid, got %+v", res)

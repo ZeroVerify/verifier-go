@@ -19,6 +19,9 @@ const (
 	ReasonProofInvalid      = "proof_invalid"
 	ReasonTimestampExpired  = "timestamp_expired"
 	ReasonCredentialRevoked = "credential_revoked"
+	// ReasonUntrustedIssuer means the proof was made against a public key other than the issuer's. Without this check
+	// anyone could sign their own credential with their own key and obtain a proof that verifies.
+	ReasonUntrustedIssuer = "untrusted_issuer"
 
 	// DefaultClockSkew is how far the prover-supplied `now` public signal may differ from the verifier's clock.
 	DefaultClockSkew = 5 * time.Minute
@@ -49,15 +52,29 @@ type CircuitInputs struct {
 }
 
 // Public signal layout of the student_status circuit:
-// [out_nonce, pseudonym_hash, revocation_index, challenge_nonce, now]
+// [out_nonce, pseudonym_hash, revocation_index, Ax, Ay, challenge_nonce, now]
 const (
 	studentSignalOutNonce        = 0
 	studentSignalPseudonymHash   = 1 // stable per person; lets a verifier detect reuse, also links a person across verifiers
 	studentSignalRevocationIndex = 2
-	studentSignalChallenge       = 3
-	studentSignalNow             = 4
-	studentSignalCount           = 5
+	studentSignalAx              = 3 // issuer public key, must equal the published issuer key
+	studentSignalAy              = 4
+	studentSignalChallenge       = 5
+	studentSignalNow             = 6
+	studentSignalCount           = 7
 )
+
+// issuerKeyMismatch reports whether the proof's Ax and Ay differ from the issuer key the verifier trusts.
+func issuerKeyMismatch(req VerifyRequest, sig []string) (bool, error) {
+	if req.BabyJubJubPubKey == "" {
+		return false, fmt.Errorf("the issuer public key is required to verify student_status proofs")
+	}
+	ax, ay, err := DecompressBabyJubJubKey(req.BabyJubJubPubKey)
+	if err != nil {
+		return false, fmt.Errorf("decompressing issuer public key: %w", err)
+	}
+	return sig[studentSignalAx] != ax || sig[studentSignalAy] != ay, nil
+}
 
 func applyStudentSignals(req *VerifyRequest) *VerifyResult {
 	sig := req.PublicSignals
@@ -120,10 +137,15 @@ var StudentStatusCircuit = &Circuit{
 		if req.PublicSignals != nil {
 			return req.PublicSignals, nil
 		}
+		ax, ay, err := DecompressBabyJubJubKey(req.BabyJubJubPubKey)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing issuer public key: %w", err)
+		}
 		return []string{
 			req.Inputs.Challenge,
 			req.Inputs.PseudonymHash,
 			strconv.Itoa(req.Inputs.RevocationIndex),
+			ax, ay,
 			req.Inputs.Challenge,
 			strconv.FormatInt(req.Inputs.Now, 10),
 		}, nil
@@ -175,6 +197,13 @@ func Verify(req VerifyRequest) (VerifyResult, error) {
 	if circuit == StudentStatusCircuit && req.PublicSignals != nil {
 		if bad := applyStudentSignals(&req); bad != nil {
 			return *bad, nil
+		}
+		mismatch, err := issuerKeyMismatch(req, req.PublicSignals)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		if mismatch {
+			return VerifyResult{Valid: false, Reason: ReasonUntrustedIssuer}, nil
 		}
 	}
 
